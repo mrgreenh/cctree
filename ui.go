@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"os"
+	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +15,9 @@ import (
 )
 
 const runningPath = "\x00running"
+
+// allSkillsPath is the skills browser's first tree row: every skill, flat.
+const allSkillsPath = "\x00skills"
 
 type pane int
 
@@ -57,6 +63,15 @@ type Model struct {
 	isScripted  bool // showing headless claude -p / SDK runs
 	isLoading   bool
 
+	// Skills mode browses skills instead of sessions. Each skill rides in a
+	// Session (Skill set) so the tree, list and filter treat both alike.
+	isSkills         bool
+	isSkillsLoading  bool
+	hasProjectSkills bool // skills were scanned after the sessions were known
+	skills           []Session
+	allSkills        *Folder
+	skillNameWidth   int
+
 	width, height int
 	ticks         int
 	message       string
@@ -71,6 +86,14 @@ type loadedMsg struct {
 	err      error
 }
 
+type skillsMsg struct {
+	skills       []Skill
+	withProjects bool
+}
+
+// shownMsg arrives when the pager or editor opened on a skill exits.
+type shownMsg struct{ err error }
+
 type liveMsg map[string]LiveSession
 
 type tickMsg struct{}
@@ -79,7 +102,16 @@ func NewModel(store Store) Model {
 	return Model{store: store, homeDir: home(), now: time.Now, expanded: map[string]bool{"~": true, runningPath: true}, shownAgents: map[string]bool{}, isLoading: true}
 }
 
+// InSkills starts the model in the skills browser.
+func (m Model) InSkills() Model {
+	m.isSkills, m.isSkillsLoading = true, true
+	return m
+}
+
 func (m Model) Init() tea.Cmd {
+	if m.isSkills {
+		return tea.Batch(m.load(), m.loadSkills(), tick())
+	}
 	return tea.Batch(m.load(), tick())
 }
 
@@ -95,6 +127,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.sessions = msg.sessions
 		m.rebuild()
+		if m.isSkills && !m.hasProjectSkills {
+			return m, m.loadSkills() // project folders are known now
+		}
+	case skillsMsg:
+		m.isSkillsLoading, m.hasProjectSkills = false, msg.withProjects
+		m.skills = make([]Session, len(msg.skills))
+		for i := range msg.skills {
+			sk := &msg.skills[i]
+			m.skills[i] = Session{ID: sk.Path, Cwd: sk.Folder, Title: clean(sk.Name), Prompt: clean(sk.Description), Updated: sk.Updated, Skill: sk}
+		}
+		isFirst := m.allSkills == nil
+		if m.isSkills {
+			m.rebuild()
+			if isFirst { // open the top folders, so the tree shows where skills live
+				for _, f := range m.root.Folders {
+					m.expanded[f.Path] = true
+				}
+				m.flatten()
+			}
+		}
+	case shownMsg:
+		if msg.err != nil {
+			m.message = "could not open: " + msg.err.Error()
+		}
 	case liveMsg:
 		m.applyLive(msg)
 	case tickMsg:
@@ -156,14 +212,38 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "/":
 		m.isFiltering = true
+		if m.isSkills { // search every skill, wherever the tree was
+			m.treeCursor, m.listCursor, m.focus = 0, 0, listPane
+		}
+	case "S", "shift+s":
+		m.isSkills = !m.isSkills
+		m.filter, m.message, m.focus, m.treeCursor, m.listCursor = "", "", treePane, 0, 0
+		m.rebuild()
+		m.treeCursor = 0
+		if m.isSkills && m.skills == nil {
+			m.isSkillsLoading = true
+			return m, m.loadSkills()
+		}
 	case "a":
-		m.isLiveOnly = !m.isLiveOnly
-		m.rebuild()
+		if !m.isSkills {
+			m.isLiveOnly = !m.isLiveOnly
+			m.rebuild()
+		}
 	case "s":
-		m.isScripted = !m.isScripted
-		m.rebuild()
+		if !m.isSkills {
+			m.isScripted = !m.isScripted
+			m.rebuild()
+		}
+	case "e":
+		if s, ok := m.session(); ok && s.Skill != nil && m.focus == listPane {
+			return m, showFile(s.Skill.Path, editor()...)
+		}
 	case "r":
 		m.isLoading, m.message = true, ""
+		if m.isSkills {
+			m.isSkillsLoading = true
+			return m, tea.Batch(m.load(), m.loadSkills())
+		}
 		return m, m.load()
 	case "tab":
 		m.focus = 1 - m.focus
@@ -234,6 +314,12 @@ func (m Model) open(isNewWindow bool) (tea.Model, tea.Cmd) {
 	s, ok := m.session()
 	if !ok {
 		return m, nil
+	}
+	if s.Skill != nil {
+		if isNewWindow {
+			return m, nil
+		}
+		return m, showFile(s.Skill.Path, "less", "-+F")
 	}
 	if s.Live {
 		m.message = FocusLive(s)
@@ -321,6 +407,11 @@ func (m *Model) rebuild() {
 	if f := m.folder(); f != nil {
 		path = f.Path
 	}
+	if m.isSkills {
+		m.rebuildSkills(path)
+		return
+	}
+	m.allSkills = nil
 	var shown, live []Session
 	for _, s := range m.sessions {
 		if m.isLiveOnly && !s.Live {
@@ -341,6 +432,36 @@ func (m *Model) rebuild() {
 	m.running = BuildTree(live, m.homeDir)
 	m.running.Path, m.running.Name = runningPath, "all"
 	prefixPaths(m.running.Folders, runningPath+"/")
+	m.restore(path)
+}
+
+// rebuildSkills is rebuild for the skills browser: a flat row of every
+// matching skill, then the tree of the folders that hold them.
+func (m *Model) rebuildSkills(path string) {
+	var shown []Session
+	m.skillNameWidth = 0
+	for _, s := range m.skills {
+		if m.filter != "" && !matches(s, m.filter, m.homeDir) {
+			continue
+		}
+		shown = append(shown, s)
+		m.skillNameWidth = max(m.skillNameWidth, lipgloss.Width(s.Title))
+	}
+	if words := strings.Fields(strings.ToLower(m.filter)); len(words) > 0 {
+		// Skills whose name matches come before those matching elsewhere.
+		sort.SliceStable(shown, func(i, j int) bool {
+			return strings.Contains(strings.ToLower(shown[i].Title), words[0]) && !strings.Contains(strings.ToLower(shown[j].Title), words[0])
+		})
+	}
+	m.root = BuildTree(shown, m.homeDir)
+	sortByTitle(m.root)
+	m.running = nil
+	m.allSkills = &Folder{Path: allSkillsPath, Name: "all skills", Sessions: shown, Total: len(shown)}
+	m.restore(path)
+}
+
+// restore flattens the tree and puts the cursor back on the folder at path.
+func (m *Model) restore(path string) {
 	m.flatten()
 	m.treeCursor = 0
 	for i, r := range m.rows {
@@ -357,7 +478,7 @@ func (m *Model) flatten() {
 	if m.root == nil {
 		return
 	}
-	isAllOpen := m.filter != "" || m.isLiveOnly
+	isAllOpen := m.isAllOpen()
 	var walk func(f *Folder, depth int, isOpen bool)
 	walk = func(f *Folder, depth int, isOpen bool) {
 		for _, c := range f.Folders {
@@ -375,8 +496,17 @@ func (m *Model) flatten() {
 			walk(m.running, 1, true)
 		}
 	}
+	if m.allSkills != nil {
+		m.rows = append(m.rows, treeRow{folder: m.allSkills})
+	}
 	walk(m.root, 0, isAllOpen)
 	m.treeCursor = clamp(m.treeCursor, 0, len(m.rows)-1)
+}
+
+// isAllOpen reports whether the tree is drawn fully expanded, as it is
+// while a filter narrows it.
+func (m Model) isAllOpen() bool {
+	return m.filter != "" || (m.isLiveOnly && !m.isSkills)
 }
 
 func (m *Model) applyLive(live map[string]LiveSession) {
@@ -475,6 +605,24 @@ func (m Model) session() (Session, bool) {
 	return *it.session, true
 }
 
+// loadSkills scans for skills, including those of every folder a session
+// ran in once the sessions are known.
+func (m Model) loadSkills() tea.Cmd {
+	store := m.store
+	withProjects := m.sessions != nil || !m.isLoading
+	seen := map[string]bool{}
+	var projects []string
+	for _, s := range m.sessions {
+		if !seen[s.Cwd] {
+			seen[s.Cwd] = true
+			projects = append(projects, s.Cwd)
+		}
+	}
+	return func() tea.Msg {
+		return skillsMsg{store.LoadSkills(projects), withProjects}
+	}
+}
+
 func (m Model) load() tea.Cmd {
 	store := m.store
 	return func() tea.Msg {
@@ -489,6 +637,7 @@ var (
 	accent   = lipgloss.Color("4")
 	liveCol  = lipgloss.Color("2")
 	busyCol  = lipgloss.Color("3")
+	skillCol = lipgloss.Color("5")
 	muted    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	green    = lipgloss.NewStyle().Foreground(liveCol)
 	bold     = lipgloss.NewStyle().Bold(true)
@@ -522,7 +671,7 @@ func (m Model) render() string {
 	if m.root != nil {
 		total = m.root.Total
 	}
-	tree += panel("Folders", fmt.Sprint(total), m.renderRows(runN, len(m.rows), leftW-4, foldersH-2), leftW, foldersH, m.focus == treePane && !isInRunning)
+	tree += panel(map[bool]string{true: "Skill folders", false: "Folders"}[m.isSkills], fmt.Sprint(total), m.renderRows(runN, len(m.rows), leftW-4, foldersH-2), leftW, foldersH, m.focus == treePane && !isInRunning)
 	title, count := m.listTitle()
 	list := panel(title, count, m.renderList(rightW-4, topH-2), rightW, topH, m.focus == listPane)
 	ptitle, pright, pbody := m.preview(m.width - 4)
@@ -556,7 +705,13 @@ func (m Model) header() string {
 	if scripted > 0 {
 		parts = append(parts, muted.Render(fmt.Sprintf("%d scripted %s", scripted, map[bool]string{true: "shown", false: "hidden"}[m.isScripted])))
 	}
-	if m.isLoading {
+	if m.isSkills {
+		parts = []string{bold.Render("cctree"), lipgloss.NewStyle().Foreground(skillCol).Render("skills"), muted.Render(fmt.Sprintf("%d skills", len(m.skills)))}
+		if m.filter != "" && m.allSkills != nil {
+			parts = append(parts, muted.Render(fmt.Sprintf("%d match", m.allSkills.Total)))
+		}
+	}
+	if m.isLoading || (m.isSkills && m.isSkillsLoading) {
 		parts = append(parts, muted.Render("scanning…"))
 	}
 	switch {
@@ -565,7 +720,7 @@ func (m Model) header() string {
 	case m.filter != "":
 		parts = append(parts, lipgloss.NewStyle().Foreground(accent).Render("filter: "+m.filter))
 	}
-	if m.isLiveOnly {
+	if m.isLiveOnly && !m.isSkills {
 		parts = append(parts, lipgloss.NewStyle().Foreground(liveCol).Render("running only"))
 	}
 	line := muted.Render("── ") + strings.Join(parts, muted.Render(" · ")) + " "
@@ -588,7 +743,7 @@ func (m Model) renderRows(from, to, w, h int) string {
 		marker := "  "
 		if len(f.Folders) > 0 {
 			marker = "▸ "
-			if m.expanded[f.Path] || m.filter != "" || m.isLiveOnly || (isRunning && f.Path != runningPath) {
+			if m.expanded[f.Path] || m.isAllOpen() || (isRunning && f.Path != runningPath) {
 				marker = "▾ "
 			}
 		}
@@ -611,7 +766,7 @@ func (m Model) renderRows(from, to, w, h int) string {
 		}
 	}
 	if to == from {
-		lines = append(lines, muted.Render(map[bool]string{true: "scanning…", false: "no sessions"}[m.isLoading]))
+		lines = append(lines, muted.Render(map[bool]string{true: "scanning…", false: "no " + m.noun()}[m.isLoading || (m.isSkills && m.isSkillsLoading)]))
 	}
 	return fill(lines, w, h)
 }
@@ -645,6 +800,18 @@ func (m Model) renderList(w, h int) string {
 			lines = append(lines, muted.Render("──")+label+muted.Render(rule)+green.Render(count))
 			continue
 		}
+		if s := list[i].session; s != nil && s.Skill != nil {
+			plain, styled := m.skillRow(s, w, f != nil && f.Path == allSkillsPath)
+			switch {
+			case i == m.listCursor && m.focus == listPane:
+				lines = append(lines, selected.Render(plain))
+			case i == m.listCursor:
+				lines = append(lines, dimSel.Render(plain))
+			default:
+				lines = append(lines, styled)
+			}
+			continue
+		}
 		left, right, markCol, isDim := m.itemText(f, list[i])
 		room := w - 1 - len([]rune(right))
 		left = ansi.Truncate(left, room, "…")
@@ -667,10 +834,62 @@ func (m Model) renderList(w, h int) string {
 		}
 	}
 	if len(list) == 0 && f != nil {
-		lines = append(lines, muted.Render("no sessions at this level"))
+		lines = append(lines, muted.Render(map[bool]string{true: "no skills match", false: "no " + m.noun() + " at this level"}[f.Path == allSkillsPath]))
 	}
 	top := scrollTop(cursorLine, h, len(lines))
 	return fill(lines[top:], w, h)
+}
+
+// skillRow lays out a skill as columns: name, description and, in the flat
+// list of every skill, the folder it lives in.
+func (m Model) skillRow(s *Session, w int, isAll bool) (plain, styled string) {
+	nameW := clamp(m.skillNameWidth, 8, max(8, min(28, w/3)))
+	name := ansi.Truncate(s.Title, nameW, "…")
+	name += strings.Repeat(" ", nameW-lipgloss.Width(name))
+	folder := ""
+	if isAll {
+		folder = "  " + tail(DisplayPath(s.Skill.Folder, m.homeDir), max(12, w/3))
+	}
+	room := max(0, w-2-nameW-2-lipgloss.Width(folder))
+	desc := ansi.Truncate(s.Prompt, room, "…")
+	desc += strings.Repeat(" ", room-lipgloss.Width(desc))
+	plain = "◆ " + name + "  " + desc + folder
+	styled = lipgloss.NewStyle().Foreground(skillCol).Render("◆") + " " + name + "  " +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("7")).Render(desc) + muted.Render(folder)
+	return plain, styled
+}
+
+// skillPreview shows a skill's description and the start of its
+// instructions.
+func (m Model) skillPreview(s *Session, w, h int) (title, right, body string) {
+	sk := s.Skill
+	label := lipgloss.NewStyle().Foreground(accent).Bold(true)
+	lines := []string{muted.Render(tail(DisplayPath(sk.Path, m.homeDir), w))}
+	if m.message != "" {
+		lines = append(lines, lipgloss.NewStyle().Foreground(accent).Render(ansi.Truncate(m.message, w, "…")))
+	}
+	lines = append(lines, "")
+	about := wrap(firstOf(s.Prompt, "(no description)"), w-8, max(2, h/3))
+	lines = append(lines, label.Render("About   ")+about[0])
+	for _, l := range about[1:] {
+		lines = append(lines, "        "+l)
+	}
+	lines = append(lines, "")
+	for _, l := range strings.Split(sk.Body, "\n") {
+		if len(lines) >= h {
+			break
+		}
+		lines = append(lines, ansi.Truncate(clean(strings.ReplaceAll(l, "\t", "    ")), w, "…"))
+	}
+	return s.Title, muted.Render(sk.Source + " skill · changed " + agoPhrase(sk.Updated, m.now())), fill(lines, w, h)
+}
+
+// noun names what the browser is listing.
+func (m Model) noun() string {
+	if m.isSkills {
+		return "skills"
+	}
+	return "sessions"
 }
 
 // itemText lays out one right-pane row: the text, the right-hand column,
@@ -729,12 +948,13 @@ func (m Model) preview(w int) (title, right, body string) {
 		return "Preview", "", fill([]string{muted.Render(firstOf(m.message, "nothing selected"))}, w, h)
 	case it.folder != nil:
 		f := it.folder
-		lines := []string{
-			muted.Render(fmt.Sprintf("%d sessions · %d running · last active %s", f.Total, f.Live, agoPhrase(f.Latest, m.now()))),
-			"",
+		summary := fmt.Sprintf("%d sessions · %d running · last active %s", f.Total, f.Live, agoPhrase(f.Latest, m.now()))
+		if m.isSkills {
+			summary = fmt.Sprintf("%d skills · last changed %s", f.Total, agoPhrase(f.Latest, m.now()))
 		}
+		lines := []string{muted.Render(summary), ""}
 		for _, sub := range f.Folders {
-			lines = append(lines, fmt.Sprintf("  ▸ %-24s %s", sub.Name+"/", muted.Render(fmt.Sprintf("%d sessions", sub.Total))))
+			lines = append(lines, fmt.Sprintf("  ▸ %-24s %s", sub.Name+"/", muted.Render(fmt.Sprintf("%d %s", sub.Total, m.noun()))))
 		}
 		return strings.TrimPrefix(f.Path, runningPath+"/"), "", fill(lines, w, h)
 	case it.agent != nil:
@@ -754,6 +974,9 @@ func (m Model) preview(w int) (title, right, body string) {
 	}
 
 	s := it.session
+	if s.Skill != nil {
+		return m.skillPreview(s, w, h)
+	}
 	right = muted.Render(agoPhrase(s.Updated, m.now()))
 	if s.Live {
 		right = lipgloss.NewStyle().Foreground(liveCol).Render("● " + s.Status)
@@ -787,7 +1010,13 @@ func (m Model) preview(w int) (title, right, body string) {
 func (m Model) listTitle() (string, string) {
 	f := m.folder()
 	if f == nil {
-		return "Sessions", ""
+		return map[bool]string{true: "Skills", false: "Sessions"}[m.isSkills], ""
+	}
+	if f.Path == allSkillsPath {
+		if m.filter != "" {
+			return "Skills matching “" + m.filter + "”", fmt.Sprint(f.Total)
+		}
+		return "All skills", fmt.Sprint(f.Total)
 	}
 	if isRunningPath(f.Path) {
 		label := "Running now"
@@ -804,6 +1033,13 @@ func (m Model) listTitle() (string, string) {
 }
 
 func (m Model) footer() string {
+	if m.isSkills {
+		keys := "↑↓ move  ←→ fold  tab switch  enter open"
+		if it, ok := m.current(); m.focus == listPane && ok && it.session != nil {
+			keys = "↑↓ move  ←→ fold  tab switch  enter read  e edit"
+		}
+		return muted.Render(ansi.Truncate(keys+"  / search all skills  r rescan  S sessions  q quit", m.width, "…"))
+	}
 	keys := "↑↓ move  ←→ fold  tab switch  enter "
 	if it, ok := m.current(); m.focus == listPane && ok && it.folder != nil {
 		keys += "open folder"
@@ -816,7 +1052,7 @@ func (m Model) footer() string {
 	} else {
 		keys += "open"
 	}
-	keys += "  / filter  a running only  s scripted  r rescan  q quit"
+	keys += "  / filter  a running only  s scripted  S skills  r rescan  q quit"
 	return muted.Render(ansi.Truncate(keys, m.width, "…"))
 }
 
@@ -887,6 +1123,56 @@ func agoPhrase(t, now time.Time) string {
 	default:
 		return "on " + a
 	}
+}
+
+// showFile hands the terminal to a command run on path (a pager or an
+// editor) and returns to cctree when it exits.
+func showFile(path string, argv ...string) tea.Cmd {
+	cmd := exec.Command(argv[0], append(argv[1:], path)...)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg { return shownMsg{err} })
+}
+
+// editor is the person's editor command: $VISUAL, then $EDITOR, then vi.
+func editor() []string {
+	for _, name := range []string{"VISUAL", "EDITOR"} {
+		if argv := strings.Fields(os.Getenv(name)); len(argv) > 0 {
+			return argv
+		}
+	}
+	return []string{"vi"}
+}
+
+// sortByTitle orders every folder's rows by name rather than by date.
+func sortByTitle(f *Folder) {
+	sort.SliceStable(f.Sessions, func(i, j int) bool {
+		return strings.ToLower(f.Sessions[i].Title) < strings.ToLower(f.Sessions[j].Title)
+	})
+	for _, c := range f.Folders {
+		sortByTitle(c)
+	}
+}
+
+// tail keeps the end of s, at most n cells wide, marking the cut with ….
+func tail(s string, n int) string {
+	if lipgloss.Width(s) <= n {
+		return s
+	}
+	r := []rune(s)
+	for len(r) > 0 && lipgloss.Width(string(r)) > n-1 {
+		r = r[1:]
+	}
+	return "…" + string(r)
+}
+
+// clean drops control characters, so text read from a file cannot send
+// escape sequences to the terminal.
+func clean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func isRunningPath(path string) bool {

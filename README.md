@@ -29,6 +29,14 @@ Browse every Claude Code session on your machine, running and past, as a folder 
 - **Subagents:** sessions that spawned subagents expand to show them, nested by who spawned whom, with workflow runs grouped.
 - **Preview:** the selected session's latest exchange — your last message and Claude's last reply — refreshed every few seconds while it runs.
 
+## Skills
+
+`cctree skills` (or `S` inside cctree) browses your skills instead of your sessions: every `SKILL.md` under `~/.claude/skills`, under `~/.claude/plugins`, and under `.claude/skills` of each folder a session ran in.
+
+- **All skills:** the first row lists every skill with its description and the folder it lives in. `/` searches all of them by name, description or folder.
+- **Skill folders:** the same folder tree as for sessions; pick a folder to see the skills in it.
+- **Preview:** the selected skill's description and the start of its instructions. `enter` reads the whole file in `less`; `e` opens it in `$VISUAL` / `$EDITOR`.
+
 ## Install
 
 macOS and Linux, with Homebrew:
@@ -41,6 +49,12 @@ Or with Go 1.26+:
 
 ```sh
 go install github.com/kateleext/cctree@latest
+```
+
+Or from a checkout:
+
+```sh
+go build -o cctree .
 ```
 
 ## Use
@@ -57,6 +71,8 @@ Run `cctree`.
 | `/` | filter by title, first prompt, folder or id |
 | `a` | running sessions only |
 | `s` | show scripted sessions (headless `claude -p` and SDK runs), hidden by default |
+| `S` | switch between sessions and skills |
+| `e` | on a skill, open it in your editor |
 | `r` | rescan |
 | `q` | quit |
 

@@ -18,11 +18,15 @@ func main() {
 			fmt.Println("cctree", version)
 			return
 		case "-h", "--help", "help":
-			fmt.Println("cctree: browse every Claude Code session, running and past, as a folder tree.\nRun it with no arguments; keys are listed at the bottom of the screen.")
+			fmt.Println("cctree: browse every Claude Code session, running and past, as a folder tree.\nRun it with no arguments; keys are listed at the bottom of the screen.\n`cctree skills` opens on your skills instead (S switches between the two).")
 			return
 		}
 	}
-	final, err := tea.NewProgram(NewModel(DefaultStore())).Run()
+	model := NewModel(DefaultStore())
+	if len(os.Args) > 1 && (os.Args[1] == "skills" || os.Args[1] == "--skills") {
+		model = model.InSkills()
+	}
+	final, err := tea.NewProgram(model).Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cctree:", err)
 		os.Exit(1)

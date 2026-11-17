@@ -33,6 +33,9 @@ type Session struct {
 	// Scripted marks a headless run (claude -p, the SDK) rather than one a
 	// person typed into.
 	Scripted bool `json:"scripted"`
+	// Skill is set when the row is a skill in the skills browser, not a
+	// session.
+	Skill *Skill `json:"-"`
 }
 
 // Agent is a subagent a session spawned, from <session>/subagents/.
@@ -534,9 +537,11 @@ func (s Store) writeCache(cache map[string]cacheEntry) {
 	if err != nil {
 		return
 	}
-	_ = os.MkdirAll(filepath.Dir(s.CacheFile), 0o755)
+	// The cache holds excerpts of conversations: keep it to its owner.
+	_ = os.MkdirAll(filepath.Dir(s.CacheFile), 0o700)
 	tmp := s.CacheFile + ".tmp"
-	if os.WriteFile(tmp, data, 0o644) == nil {
+	_ = os.Remove(tmp)
+	if os.WriteFile(tmp, data, 0o600) == nil {
 		_ = os.Rename(tmp, s.CacheFile)
 	}
 }
