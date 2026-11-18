@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -40,7 +41,11 @@ func TestLoadSkillsFindsUserPluginAndProjectSkills(t *testing.T) {
 	writeSkill(t, filepath.Join(claude, "skills", ".trash", "old"), "---\nname: old\n---\n")
 	writeSkill(t, filepath.Join(claude, "plugins", "cache", "stripe", "skills", "pay"), "---\ndescription: Take payments\n---\n")
 	writeSkill(t, filepath.Join(home, "work", ".claude", "skills", "release"), "---\nname: release\n---\n")
-	if err := os.MkdirAll(project, 0o755); err != nil {
+	writeSkill(t, filepath.Join(project, "tools", "oracle", ".claude", "skills", "oracle"), "---\nname: oracle\n---\n")
+	// A project whose sessions are not listed still counts, from its key.
+	other := filepath.Join(home, "side")
+	writeSkill(t, filepath.Join(other, ".claude", "skills", "side"), "---\nname: side\n---\n")
+	if err := os.MkdirAll(filepath.Join(claude, "projects", strings.ReplaceAll(other, "/", "-")), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -49,7 +54,7 @@ func TestLoadSkillsFindsUserPluginAndProjectSkills(t *testing.T) {
 	for _, s := range skills {
 		got[s.Name] = s.Source
 	}
-	if len(skills) != 3 || got["deslop"] != "user" || got["pay"] != "plugin" || got["release"] != "project" {
+	if len(skills) != 5 || got["deslop"] != "user" || got["pay"] != "plugin" || got["release"] != "project" || got["oracle"] != "project" || got["side"] != "project" {
 		t.Fatalf("skills: %+v", got)
 	}
 	if skills[0].Name != "deslop" || skills[0].Description != "Remove slop" || skills[0].Folder != filepath.Join(claude, "skills") || skills[0].Body != "body" {

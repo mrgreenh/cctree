@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -39,7 +40,7 @@ func (s Store) LoadSkills(projects []string) []Skill {
 	}
 	scan(filepath.Join(s.ClaudeDir, "skills"), "user")
 	scan(filepath.Join(s.ClaudeDir, "plugins"), "plugin")
-	for _, dir := range projectSkillDirs(projects, filepath.Dir(s.ClaudeDir)) {
+	for _, dir := range projectSkillDirs(append(s.projectFolders(), projects...), filepath.Dir(s.ClaudeDir)) {
 		scan(dir, "project")
 	}
 	sort.SliceStable(skills, func(i, j int) bool {
@@ -89,12 +90,55 @@ func walkSkills(root string, depth int, seen map[string]bool, found func(string)
 	}
 }
 
-// projectSkillDirs lists the .claude/skills folders of each project folder
-// and its parents, stopping at stop (home, whose own is the user's).
+// projectFolders decodes every project key under projects/ back to its
+// folder, so a project counts even when none of its sessions is listed.
+func (s Store) projectFolders() []string {
+	entries, _ := os.ReadDir(filepath.Join(s.ClaudeDir, "projects"))
+	resolver := newFolderResolver()
+	var out []string
+	for _, e := range entries {
+		if dir := resolver.decode(e.Name()); dir != "" {
+			out = append(out, dir)
+		}
+	}
+	return out
+}
+
+// nestedSkillDirs finds .claude/skills in the folders up to depth levels
+// below dir, for a package or tool that keeps its own inside a project.
+func nestedSkillDirs(dir string, depth int, found func(string)) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "target" || name == "dist" || name == "build" {
+			continue
+		}
+		sub := filepath.Join(dir, name)
+		if st, err := os.Stat(filepath.Join(sub, ".claude", "skills")); err == nil && st.IsDir() {
+			found(filepath.Join(sub, ".claude", "skills"))
+		}
+		if depth > 1 {
+			nestedSkillDirs(sub, depth-1, found)
+		}
+	}
+}
+
+// projectSkillDirs lists the .claude/skills folders of each project folder,
+// its parents and the folders just below it, stopping at stop (home, whose
+// own is the user's).
 func projectSkillDirs(projects []string, stop string) []string {
 	checked := map[string]bool{}
+	scanned := map[string]bool{}
 	var dirs []string
 	for _, p := range projects {
+		// Home and anything above it is not a project to search through.
+		if p = filepath.Clean(p); filepath.IsAbs(p) && !scanned[p] && p != stop && !strings.HasPrefix(stop, strings.TrimSuffix(p, "/")+"/") {
+			scanned[p] = true
+			nestedSkillDirs(p, 2, func(d string) { dirs = append(dirs, d) })
+		}
 		for dir := filepath.Clean(p); filepath.IsAbs(dir) && dir != stop && !checked[dir]; dir = filepath.Dir(dir) {
 			checked[dir] = true
 			candidate := filepath.Join(dir, ".claude", "skills")
@@ -107,7 +151,7 @@ func projectSkillDirs(projects []string, stop string) []string {
 		}
 	}
 	sort.Strings(dirs)
-	return dirs
+	return slices.Compact(dirs)
 }
 
 func readSkill(path string) (Skill, bool) {

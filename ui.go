@@ -341,6 +341,7 @@ func (m *Model) move(delta int) {
 	if m.focus == treePane {
 		m.treeCursor = clamp(m.treeCursor+delta, 0, len(m.rows)-1)
 		m.listCursor = 0
+		m.settle(1) // the running list opens on a divider
 	} else {
 		m.listCursor = clamp(m.listCursor+delta, 0, len(m.list())-1)
 		m.settle(map[bool]int{true: 1, false: -1}[delta > 0])
@@ -944,7 +945,7 @@ func (m Model) preview(w int) (title, right, body string) {
 	label := lipgloss.NewStyle().Foreground(accent).Bold(true)
 	it, ok := m.current()
 	switch {
-	case !ok:
+	case !ok || (it.folder == nil && it.session == nil):
 		return "Preview", "", fill([]string{muted.Render(firstOf(m.message, "nothing selected"))}, w, h)
 	case it.folder != nil:
 		f := it.folder

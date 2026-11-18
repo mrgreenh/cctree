@@ -113,6 +113,22 @@ func TestSubfoldersAndAgentsNest(t *testing.T) {
 	}
 }
 
+func TestMovingThroughTheRunningTreeSkipsDividers(t *testing.T) {
+	sessions := append(fixture(), at("f", "/home/me/work/apps/web", 2, true))
+	m := NewModel(Store{})
+	m.homeDir = "/home/me"
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	next, _ = next.Update(loadedMsg{sessions: sessions})
+	m = next.(Model)
+	for range len(m.rows) + 1 {
+		m = press(m, "down")
+		if it, ok := m.current(); ok && it.header != "" {
+			t.Fatalf("cursor rests on a divider at tree row %d", m.treeCursor)
+		}
+		m.render()
+	}
+}
+
 func gotoRow(m Model, path string) Model {
 	for i, r := range m.rows {
 		if r.folder.Path == path {
