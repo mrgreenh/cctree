@@ -129,6 +129,25 @@ func TestMovingThroughTheRunningTreeSkipsDividers(t *testing.T) {
 	}
 }
 
+func TestWriteTreePrintsFoldersThenTheirSessions(t *testing.T) {
+	var out strings.Builder
+	writeTree(&out, BuildTree(fixture(), "/home/me"), 0)
+	want := `~/
+  - title d
+  work/apps/
+    api/
+      - title a (running)
+      - title b
+    web/
+      - title c
+/tmp/x/
+  - title e
+`
+	if out.String() != want {
+		t.Fatalf("got:\n%s", out.String())
+	}
+}
+
 func gotoRow(m Model, path string) Model {
 	for i, r := range m.rows {
 		if r.folder.Path == path {

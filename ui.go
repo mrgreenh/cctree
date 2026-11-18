@@ -132,11 +132,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case skillsMsg:
 		m.isSkillsLoading, m.hasProjectSkills = false, msg.withProjects
-		m.skills = make([]Session, len(msg.skills))
-		for i := range msg.skills {
-			sk := &msg.skills[i]
-			m.skills[i] = Session{ID: sk.Path, Cwd: sk.Folder, Title: clean(sk.Name), Prompt: clean(sk.Description), Updated: sk.Updated, Skill: sk}
-		}
+		m.skills = skillRows(msg.skills)
 		isFirst := m.allSkills == nil
 		if m.isSkills {
 			m.rebuild()
@@ -611,14 +607,7 @@ func (m Model) session() (Session, bool) {
 func (m Model) loadSkills() tea.Cmd {
 	store := m.store
 	withProjects := m.sessions != nil || !m.isLoading
-	seen := map[string]bool{}
-	var projects []string
-	for _, s := range m.sessions {
-		if !seen[s.Cwd] {
-			seen[s.Cwd] = true
-			projects = append(projects, s.Cwd)
-		}
-	}
+	projects := cwds(m.sessions)
 	return func() tea.Msg {
 		return skillsMsg{store.LoadSkills(projects), withProjects}
 	}
@@ -717,9 +706,10 @@ func (m Model) header() string {
 	}
 	switch {
 	case m.isFiltering:
-		parts = append(parts, lipgloss.NewStyle().Foreground(accent).Render("/"+m.filter+"█"))
+		// Bold in the terminal's own text colour: blue is hard to read on black.
+		parts = append(parts, bold.Render("/"+m.filter+"█"))
 	case m.filter != "":
-		parts = append(parts, lipgloss.NewStyle().Foreground(accent).Render("filter: "+m.filter))
+		parts = append(parts, muted.Render("filter: ")+bold.Render(m.filter))
 	}
 	if m.isLiveOnly && !m.isSkills {
 		parts = append(parts, lipgloss.NewStyle().Foreground(liveCol).Render("running only"))

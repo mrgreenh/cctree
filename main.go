@@ -11,19 +11,42 @@ import (
 
 var version = "dev"
 
+const usage = `cctree: browse every Claude Code session, running and past, as a folder tree.
+Run it with no arguments; keys are listed at the bottom of the screen.
+
+  cctree skills          browse your skills instead (S switches between the two)
+  cctree --print         print the folder tree of sessions as text and exit
+  cctree skills --print  print the folder tree of skills as text and exit`
+
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	isSkills, isPrint := false, false
+	for _, arg := range os.Args[1:] {
+		switch arg {
 		case "-v", "--version", "version":
 			fmt.Println("cctree", version)
 			return
 		case "-h", "--help", "help":
-			fmt.Println("cctree: browse every Claude Code session, running and past, as a folder tree.\nRun it with no arguments; keys are listed at the bottom of the screen.\n`cctree skills` opens on your skills instead (S switches between the two).")
+			fmt.Println(usage)
 			return
+		case "skills", "--skills":
+			isSkills = true
+		case "-p", "--print":
+			isPrint = true
+		default:
+			fmt.Fprintf(os.Stderr, "cctree: unknown argument %q\n%s\n", arg, usage)
+			os.Exit(2)
 		}
 	}
-	model := NewModel(DefaultStore())
-	if len(os.Args) > 1 && (os.Args[1] == "skills" || os.Args[1] == "--skills") {
+	store := DefaultStore()
+	if isPrint {
+		if err := PrintTree(os.Stdout, store, isSkills); err != nil {
+			fmt.Fprintln(os.Stderr, "cctree:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	model := NewModel(store)
+	if isSkills {
 		model = model.InSkills()
 	}
 	final, err := tea.NewProgram(model).Run()

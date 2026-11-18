@@ -37,6 +37,17 @@ Browse every Claude Code session on your machine, running and past, as a folder 
 - **Skill folders:** the same folder tree as for sessions; pick a folder to see the skills in it.
 - **Preview:** the selected skill's description and the start of its instructions. `enter` reads the whole file in `less`; `e` opens it in `$VISUAL` / `$EDITOR`.
 
+## Print
+
+`cctree --print` writes the folder tree of sessions as plain text and exits; `cctree skills --print` does the same for skills. Each folder is followed by what is in it, then its subfolders:
+
+```
+~/work/
+  api/
+    - release checklist (running)
+    - fix flaky auth test
+```
+
 ## Install
 
 macOS and Linux, with Homebrew:
