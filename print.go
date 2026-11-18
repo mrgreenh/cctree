@@ -7,7 +7,8 @@ import (
 )
 
 // PrintTree writes the folder tree as plain text: each folder, the sessions
-// (or skills) in it, then its subfolders, indented by depth.
+// (or skills) in it, then its subfolders, indented by depth. Skills are
+// limited to the person's own, leaving out second checkouts of a project.
 func PrintTree(w io.Writer, store Store, isSkills bool) error {
 	sessions, err := store.Load()
 	if err != nil {
@@ -15,7 +16,13 @@ func PrintTree(w io.Writer, store Store, isSkills bool) error {
 	}
 	var root *Folder
 	if isSkills {
-		root = BuildTree(skillRows(store.LoadSkills(cwds(sessions))), home())
+		var own []Skill
+		for _, k := range store.LoadSkills(cwds(sessions)) {
+			if k.IsOwn() && !(k.Source == "project" && inWorktree(k.Folder)) {
+				own = append(own, k)
+			}
+		}
+		root = BuildTree(skillRows(own), home())
 		sortByTitle(root)
 	} else {
 		var shown []Session

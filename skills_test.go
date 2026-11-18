@@ -41,6 +41,18 @@ func TestLoadSkillsFindsUserPluginAndProjectSkills(t *testing.T) {
 	writeSkill(t, filepath.Join(claude, "skills", ".trash", "old"), "---\nname: old\n---\n")
 	writeSkill(t, filepath.Join(claude, "plugins", "cache", "stripe", "skills", "pay"), "---\ndescription: Take payments\n---\n")
 	writeSkill(t, filepath.Join(home, "work", ".claude", "skills", "release"), "---\nname: release\n---\n")
+	writeSkill(t, filepath.Join(claude, "skills", "vendor", "skills", "tool"), "---\nname: tool\n---\n")
+	synced := filepath.Join(claude, "skills", "synced", "bucket")
+	writeSkill(t, filepath.Join(synced, "pdf"), "---\nname: pdf\n---\n")
+	writeSkill(t, filepath.Join(synced, "mine"), "---\nname: mine\n---\n")
+	for path, content := range map[string]string{
+		filepath.Join(claude, "skills", "vendor", "plugin.json"): "{}",
+		filepath.Join(synced, "manifest.json"):                   `{"skills":[{"name":"pdf"},{"name":"mine","creatorType":"user"}]}`,
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	writeSkill(t, filepath.Join(project, "tools", "oracle", ".claude", "skills", "oracle"), "---\nname: oracle\n---\n")
 	// A project whose sessions are not listed still counts, from its key.
 	other := filepath.Join(home, "side")
@@ -54,7 +66,10 @@ func TestLoadSkillsFindsUserPluginAndProjectSkills(t *testing.T) {
 	for _, s := range skills {
 		got[s.Name] = s.Source
 	}
-	if len(skills) != 5 || got["deslop"] != "user" || got["pay"] != "plugin" || got["release"] != "project" || got["oracle"] != "project" || got["side"] != "project" {
+	if got["tool"] != "plugin" || got["pdf"] != "bundled" || got["mine"] != "user" {
+		t.Fatalf("sources under the user folder: %+v", got)
+	}
+	if len(skills) != 8 || got["deslop"] != "user" || got["pay"] != "plugin" || got["release"] != "project" || got["oracle"] != "project" || got["side"] != "project" {
 		t.Fatalf("skills: %+v", got)
 	}
 	if skills[0].Name != "deslop" || skills[0].Description != "Remove slop" || skills[0].Folder != filepath.Join(claude, "skills") || skills[0].Body != "body" {

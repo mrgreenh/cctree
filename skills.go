@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ type Skill struct {
 	Description string
 	Path        string // the SKILL.md file
 	Folder      string // the folder holding the skill's own directory
-	Source      string // "user", "plugin" or "project"
+	Source      string // "user", "project", "plugin" or "bundled" (synced from Anthropic)
 	Body        string // the start of the instructions, for the preview
 	Updated     time.Time
 }
@@ -38,7 +39,12 @@ func (s Store) LoadSkills(projects []string) []Skill {
 			}
 		})
 	}
-	scan(filepath.Join(s.ClaudeDir, "skills"), "user")
+	userRoot := filepath.Join(s.ClaudeDir, "skills")
+	scan(userRoot, "user")
+	manifests := map[string]map[string]string{}
+	for i := range skills {
+		skills[i].Source = userSkillSource(skills[i], userRoot, manifests)
+	}
 	scan(filepath.Join(s.ClaudeDir, "plugins"), "plugin")
 	for _, dir := range projectSkillDirs(append(s.projectFolders(), projects...), filepath.Dir(s.ClaudeDir)) {
 		scan(dir, "project")
@@ -88,6 +94,68 @@ func walkSkills(root string, depth int, seen map[string]bool, found func(string)
 			walkSkills(path, depth+1, seen, found)
 		}
 	}
+}
+
+// IsOwn reports whether the person wrote the skill, rather than it coming
+// with a plugin or from Anthropic.
+func (k Skill) IsOwn() bool {
+	return k.Source == "user" || k.Source == "project"
+}
+
+// userSkillSource tells apart what sits under the user's skills folder: a
+// plugin installed there (it carries a plugin manifest), a skill synced from
+// claude.ai that Anthropic wrote, and the person's own.
+func userSkillSource(k Skill, root string, manifests map[string]map[string]string) string {
+	for dir := filepath.Dir(k.Path); dir != root && len(dir) > len(root); dir = filepath.Dir(dir) {
+		for _, mark := range []string{"plugin.json", ".claude-plugin"} {
+			if _, err := os.Stat(filepath.Join(dir, mark)); err == nil {
+				return "plugin"
+			}
+		}
+	}
+	creators, ok := manifests[k.Folder]
+	if !ok {
+		creators = syncedCreators(filepath.Join(k.Folder, "manifest.json"))
+		manifests[k.Folder] = creators
+	}
+	if creators != nil && creators[filepath.Base(filepath.Dir(k.Path))] != "user" {
+		return "bundled"
+	}
+	return "user"
+}
+
+// syncedCreators reads a synced folder's manifest: who created each skill,
+// by name. Nil when the folder has no manifest.
+func syncedCreators(path string) map[string]string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var manifest struct {
+		Skills []struct {
+			Name        string `json:"name"`
+			CreatorType string `json:"creatorType"`
+		} `json:"skills"`
+	}
+	if json.Unmarshal(data, &manifest) != nil {
+		return nil
+	}
+	creators := map[string]string{}
+	for _, k := range manifest.Skills {
+		creators[k.Name] = k.CreatorType
+	}
+	return creators
+}
+
+// inWorktree reports whether dir is inside a linked git worktree, whose
+// .git is a file: a second checkout of a repository found elsewhere.
+func inWorktree(dir string) bool {
+	for ; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		if st, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return !st.IsDir()
+		}
+	}
+	return false
 }
 
 // projectFolders decodes every project key under projects/ back to its

@@ -39,7 +39,7 @@ Browse every Claude Code session on your machine, running and past, as a folder 
 
 ## Print
 
-`cctree --print` writes the folder tree of sessions as plain text and exits; `cctree skills --print` does the same for skills. Each folder is followed by what is in it, then its subfolders:
+`cctree --print` writes the folder tree of sessions as plain text and exits; `cctree skills --print` does the same for the skills you wrote (not those from plugins or Anthropic, and not the copies in git worktrees). Each folder is followed by what is in it, then its subfolders:
 
 ```
 ~/work/
